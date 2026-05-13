@@ -87,16 +87,14 @@ def scrape_inmuebles24(driver, colonia):
         driver.get(url)
         time.sleep(4)
         page_source = driver.page_source
-
-        # Debug: show what selectors find
+        print(f"    [I24] {colonia} page length: {len(page_source)}")
+        print(f"    [I24] sample: {page_source[500:800]}")
         s1 = driver.find_elements(By.CSS_SELECTOR, '[data-qa="posting PROPERTY"]')
         s2 = driver.find_elements(By.CSS_SELECTOR, '.listing-card')
         s3 = driver.find_elements(By.CSS_SELECTOR, '[class*="posting"]')
         s4 = driver.find_elements(By.CSS_SELECTOR, 'article')
         print(f"    [I24] {colonia}: s1={len(s1)} s2={len(s2)} s3={len(s3)} s4={len(s4)}")
-
         listings = s1 or s2 or s3 or s4
-
         for item in listings[:10]:
             try:
                 title = item.text[:80] if item.text else "Terreno"
@@ -119,7 +117,7 @@ def scrape_all():
     try:
         driver = get_driver()
         print("  [Chrome OK]")
-        for colonia in COLONIAS:
+        for colonia in COLONIAS[:2]:
             print(f"  Scraping {COLONIAS_DISPLAY.get(colonia, colonia)}...")
             r = scrape_inmuebles24(driver, colonia)
             all_results.extend(r)
