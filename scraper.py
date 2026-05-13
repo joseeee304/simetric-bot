@@ -1,106 +1,75 @@
-import requests
 import time
 import os
-
-HEADERS = {"User-Agent": "Mozilla/5.0", "Accept-Language": "es-MX"}
+import re
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 MIN_M2 = 400
 MAX_M2 = 1500
 MIN_FRENTE = 14
 
-ML_CLIENT_ID = os.environ.get("ML_CLIENT_ID", "")
-ML_CLIENT_SECRET = os.environ.get("ML_CLIENT_SECRET", "")
-EASYBROKER_KEY = os.environ.get("EASYBROKER_API_KEY", "")
+COLONIAS = [
+    "del-valle-norte", "del-valle-centro", "roma-norte", "roma-sur",
+    "napoles", "cuauhtemoc", "juarez", "ciudad-de-los-deportes",
+    "san-rafael", "tabacalera", "condesa", "hipodromo",
+    "hipodromo-condesa", "anzures"
+]
 
-_ml_token = None
-_ml_token_expiry = 0
-
-# Neighborhood IDs from MercadoLibre API - exact matches for target colonias
-NEIGHBORHOODS = {
-    # Benito Juárez
-    "Del Valle Centro":          "TUxNQkRFTEEwN0U",
-    "Del Valle Norte":           "TUxNTUxNQkRFTEFKQg",
-    "Nápoles":                   "TUxNQk7BUDUwNzQ",
-    "Ciudad de los Deportes":    "TUxNQkNJVTYzMDc",
-    "Colonia Del Valle":         "TUxNQkRFTDY3NTg",
-    # Cuauhtémoc - get from that city
-    # Miguel Hidalgo - get from that city
+COLONIAS_DISPLAY = {
+    "del-valle-norte": "Del Valle Norte",
+    "del-valle-centro": "Del Valle Centro",
+    "roma-norte": "Roma Norte",
+    "roma-sur": "Roma Sur",
+    "napoles": "Nápoles",
+    "cuauhtemoc": "Cuauhtémoc",
+    "juarez": "Juárez",
+    "ciudad-de-los-deportes": "Ciudad de los Deportes",
+    "san-rafael": "San Rafael",
+    "tabacalera": "Tabacalera",
+    "condesa": "Condesa",
+    "hipodromo": "Hipódromo",
+    "hipodromo-condesa": "Hipódromo Condesa",
+    "anzures": "Anzures",
 }
 
-# City IDs to search
-CITY_IDS = {
-    "Benito Juárez":   "TUxNQ0JFTjM2MjQ",
-    "Cuauhtémoc":      "TUxNQ0NVQTczMTI",
-    "Miguel Hidalgo":  "TUxNQ01JRzU0Mjg",
-}
 
-# MLM real estate category for terrenos
-ML_CATEGORY = "MLM1473"
+def get_driver():
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    options.binary_location = os.environ.get("CHROME_BIN", "/usr/bin/chromium")
+
+    from selenium.webdriver.chrome.service import Service
+    service = Service(os.environ.get("CHROMEDRIVER_PATH", "/usr/bin/chromedriver"))
+    driver = webdriver.Chrome(service=service, options=options)
+    driver.set_page_load_timeout(30)
+    return driver
 
 
-def get_ml_token():
-    global _ml_token, _ml_token_expiry
-    now = time.time()
-    if _ml_token and now < _ml_token_expiry:
-        return _ml_token
-    try:
-        r = requests.post(
-            "https://api.mercadolibre.com/oauth/token",
-            data={
-                "grant_type": "client_credentials",
-                "client_id": ML_CLIENT_ID,
-                "client_secret": ML_CLIENT_SECRET,
-            },
-            timeout=15
-        )
-        if r.status_code == 200:
-            data = r.json()
-            _ml_token = data.get("access_token")
-            _ml_token_expiry = now + data.get("expires_in", 21600) - 300
-            print(f"  [ML] Token OK")
-            return _ml_token
-        else:
-            print(f"  [ML] Token error: {r.status_code} {r.text[:100]}")
-    except Exception as e:
-        print(f"  [ML] Token error: {e}")
+def parse_number(text):
+    if not text:
+        return None
+    nums = re.findall(r'[\d,\.]+', str(text).replace(',', ''))
+    if nums:
+        try:
+            return float(nums[0])
+        except:
+            return None
     return None
 
 
-def get_neighborhoods_for_city(city_id, token):
-    """Fetch all neighborhoods for a city from ML API."""
-    try:
-        r = requests.get(
-            f"https://api.mercadolibre.com/classified_locations/cities/{city_id}",
-            headers={**HEADERS, "Authorization": f"Bearer {token}"},
-            timeout=15
-        )
-        if r.status_code == 200:
-            return r.json().get("neighborhoods", [])
-    except Exception as e:
-        print(f"  [ML] Error fetching neighborhoods: {e}")
-    return []
-
-
-TARGET_COLONIAS = [
-    "del valle norte", "del valle centro", "roma norte", "roma sur",
-    "napoles", "nápoles", "cuauhtémoc", "cuauhtemoc", "juárez", "juarez",
-    "ciudad de los deportes", "san rafael", "tabacalera", "condesa",
-    "hipódromo", "hipodromo", "hipódromo condesa", "hipodromo condesa", "anzures"
-]
-
-
-def matches_target(name):
-    if not name:
-        return False
-    n = name.lower().replace("á","a").replace("é","e").replace("í","i").replace("ó","o").replace("ú","u")
-    for c in TARGET_COLONIAS:
-        c2 = c.replace("á","a").replace("é","e").replace("í","i").replace("ó","o").replace("ú","u")
-        if c2 in n or n in c2:
-            return True
-    return False
-
-
-def make_listing(portal, title, price, price_text, area, frente, link, colonia=""):
+def make_listing(portal, title, price_text, area_text, link, colonia):
+    price = parse_number(price_text)
+    area = parse_number(area_text)
+    if area and (area < MIN_M2 or area > MAX_M2):
+        return None
     return {
         "id": f"{portal[:4]}_{abs(hash(link)) % 9999999}",
         "portal": portal,
@@ -109,165 +78,113 @@ def make_listing(portal, title, price, price_text, area, frente, link, colonia="
         "price": price,
         "price_text": price_text or "",
         "area": area,
-        "frente": frente,
+        "area_text": area_text or "",
+        "frente": None,
         "link": link,
     }
 
 
-def passes_filters(area, frente):
-    if area and (area < MIN_M2 or area > MAX_M2):
-        return False
-    if frente and frente < MIN_FRENTE:
-        return False
-    return True
-
-
-def search_by_neighborhood(neighborhood_id, neighborhood_name, token):
-    """Search terrenos in a specific neighborhood."""
+def scrape_inmuebles24(driver, colonia):
     results = []
+    url = f"https://www.inmuebles24.com/terrenos-en-venta-en-{colonia}-ciudad-de-mexico.html"
     try:
-        url = (
-            f"https://api.mercadolibre.com/sites/MLM/search"
-            f"?category={ML_CATEGORY}"
-            f"&neighborhood={neighborhood_id}"
-            f"&limit=50"
-        )
-        r = requests.get(url, headers={**HEADERS, "Authorization": f"Bearer {token}"}, timeout=15)
-        if r.status_code != 200:
-            # Try with state filter
-            url2 = (
-                f"https://api.mercadolibre.com/sites/MLM/search"
-                f"?category={ML_CATEGORY}"
-                f"&state=TUxNUERJUzYwOTQ"
-                f"&city={neighborhood_id}"
-                f"&limit=50"
+        driver.get(url)
+        time.sleep(3)
+
+        # Wait for listings to load
+        try:
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, '[data-qa="posting PROPERTY"]'))
             )
-            r = requests.get(url2, headers={**HEADERS, "Authorization": f"Bearer {token}"}, timeout=15)
-            if r.status_code != 200:
-                return results
+        except:
+            pass
 
-        items = r.json().get("results", [])
-        for item in items:
+        listings = driver.find_elements(By.CSS_SELECTOR, '[data-qa="posting PROPERTY"]')
+        if not listings:
+            listings = driver.find_elements(By.CSS_SELECTOR, '.listing-card')
+
+        for item in listings[:10]:
             try:
-                title = item.get("title", "")
-                price = item.get("price")
-                link = item.get("permalink", "")
-                currency = item.get("currency_id", "MXN")
-                price_text = f"${price:,.0f} {currency}" if price else ""
+                title_el = item.find_elements(By.CSS_SELECTOR, '[data-qa="posting-title"]')
+                price_el = item.find_elements(By.CSS_SELECTOR, '[data-qa="price"]')
+                area_el = item.find_elements(By.CSS_SELECTOR, '[data-qa="surface-area"]')
+                link_el = item.find_elements(By.TAG_NAME, 'a')
 
-                area = None
-                frente = None
+                title = title_el[0].text if title_el else "Terreno"
+                price_text = price_el[0].text if price_el else ""
+                area_text = area_el[0].text if area_el else ""
+                link = link_el[0].get_attribute('href') if link_el else url
 
-                for attr in item.get("attributes", []):
-                    attr_id = attr.get("id", "")
-                    val = attr.get("value_name", "") or ""
-                    if attr_id in ("TOTAL_AREA", "LOT_SIZE", "SURFACE_TOTAL"):
-                        try: area = float(str(val).replace(",","").replace("m²","").strip())
-                        except: pass
-                    elif attr_id == "LOT_FRONTAGE":
-                        try: frente = float(str(val).replace("m","").strip())
-                        except: pass
-
-                if not passes_filters(area, frente):
-                    continue
-
-                results.append(make_listing(
-                    "MercadoLibre", title, price, price_text,
-                    area, frente, link, neighborhood_name
-                ))
+                l = make_listing("Inmuebles24", title, price_text, area_text, link, COLONIAS_DISPLAY.get(colonia, colonia))
+                if l:
+                    results.append(l)
             except Exception:
                 continue
 
     except Exception as e:
-        print(f"    Error {neighborhood_name}: {e}")
+        print(f"    [I24] Error {colonia}: {e}")
     return results
 
 
-def scrape_mercadolibre_api():
+def scrape_vivanuncios(driver, colonia):
     results = []
-    print("  [MercadoLibre API]")
+    url = f"https://www.vivanuncios.com.mx/s-terrenos-en-venta/{colonia}/v1c1117l10201p1"
+    try:
+        driver.get(url)
+        time.sleep(3)
 
-    token = get_ml_token()
-    if not token:
-        print("    Sin token — skip")
-        return results
+        listings = driver.find_elements(By.CSS_SELECTOR, '.ad-listing')
+        if not listings:
+            listings = driver.find_elements(By.CSS_SELECTOR, '[data-id]')
 
-    # Get neighborhoods for each target city and filter by target colonias
-    all_target_neighborhoods = {}
+        for item in listings[:10]:
+            try:
+                title_el = item.find_elements(By.TAG_NAME, 'h2')
+                price_el = item.find_elements(By.CSS_SELECTOR, '.price')
+                link_el = item.find_elements(By.TAG_NAME, 'a')
 
-    for city_name, city_id in CITY_IDS.items():
-        neighborhoods = get_neighborhoods_for_city(city_id, token)
-        for nb in neighborhoods:
-            if matches_target(nb.get("name", "")):
-                all_target_neighborhoods[nb["id"]] = nb["name"]
-                print(f"    ✓ Colonia encontrada: {nb['name']}")
-        time.sleep(0.3)
+                title = title_el[0].text if title_el else "Terreno"
+                price_text = price_el[0].text if price_el else ""
+                link = link_el[0].get_attribute('href') if link_el else url
 
-    print(f"  Buscando en {len(all_target_neighborhoods)} colonias...")
+                l = make_listing("Vivanuncios", title, price_text, "", link, COLONIAS_DISPLAY.get(colonia, colonia))
+                if l:
+                    results.append(l)
+            except Exception:
+                continue
 
-    # Search terrenos in each target neighborhood
-    for nb_id, nb_name in all_target_neighborhoods.items():
-        found = search_by_neighborhood(nb_id, nb_name, token)
-        results.extend(found)
-        if found:
-            print(f"    {nb_name}: {len(found)} terrenos")
-        time.sleep(0.5)
-
-    print(f"    Total ML: {len(results)} terrenos")
-    return results
-
-
-def scrape_easybroker_api():
-    results = []
-    if not EASYBROKER_KEY:
-        return results
-
-    print("  [EasyBroker API]")
-    page = 1
-    while page <= 5:
-        try:
-            r = requests.get(
-                f"https://api.easybroker.com/v1/properties"
-                f"?operation_type=sale&property_type=land"
-                f"&location=Ciudad+de+Mexico&page={page}&per_page=50",
-                headers={**HEADERS, "X-Authorization": EASYBROKER_KEY},
-                timeout=15
-            )
-            if r.status_code != 200:
-                break
-            items = r.json().get("content", [])
-            if not items:
-                break
-            for item in items:
-                try:
-                    title = item.get("title", "Terreno")
-                    price = item.get("asking_price")
-                    price_text = f"${price:,.0f} MXN" if price else ""
-                    link = item.get("public_url", "")
-                    area = item.get("lot_size") or item.get("construction_size")
-                    nb = (item.get("location") or {}).get("neighborhood", "") or ""
-                    colonia = nb if matches_target(nb) else ""
-                    if not colonia or not passes_filters(area, None):
-                        continue
-                    results.append(make_listing(
-                        "EasyBroker", title, price, price_text,
-                        area, None, link, colonia
-                    ))
-                except Exception:
-                    continue
-            page += 1
-            time.sleep(1)
-        except Exception as e:
-            print(f"    EB error: {e}")
-            break
-
-    print(f"    Total EB: {len(results)} terrenos")
+    except Exception as e:
+        print(f"    [VV] Error {colonia}: {e}")
     return results
 
 
 def scrape_all():
     all_results = []
-    all_results.extend(scrape_mercadolibre_api())
-    all_results.extend(scrape_easybroker_api())
-    print(f"\n  Total: {len(all_results)} terrenos que cumplen filtros")
+    print("  [Selenium scraper iniciando...]")
+
+    driver = None
+    try:
+        driver = get_driver()
+        print("  [Chrome OK]")
+
+        for colonia in COLONIAS:
+            print(f"  Scraping {COLONIAS_DISPLAY.get(colonia, colonia)}...")
+
+            r1 = scrape_inmuebles24(driver, colonia)
+            all_results.extend(r1)
+            time.sleep(2)
+
+            r2 = scrape_vivanuncios(driver, colonia)
+            all_results.extend(r2)
+            time.sleep(2)
+
+        print(f"  Total: {len(all_results)} terrenos encontrados")
+
+    except Exception as e:
+        print(f"  [Selenium error]: {e}")
+        import traceback; traceback.print_exc()
+    finally:
+        if driver:
+            driver.quit()
+
     return all_results
