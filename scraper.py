@@ -4,12 +4,9 @@ import re
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 
 MIN_M2 = 400
 MAX_M2 = 1500
-MIN_FRENTE = 14
 
 COLONIAS = [
     "del-valle-norte", "del-valle-centro", "roma-norte", "roma-sur",
@@ -23,15 +20,15 @@ COLONIAS_DISPLAY = {
     "del-valle-centro": "Del Valle Centro",
     "roma-norte": "Roma Norte",
     "roma-sur": "Roma Sur",
-    "napoles": "Nápoles",
-    "cuauhtemoc": "Cuauhtémoc",
-    "juarez": "Juárez",
+    "napoles": "Napoles",
+    "cuauhtemoc": "Cuauhtemoc",
+    "juarez": "Juarez",
     "ciudad-de-los-deportes": "Ciudad de los Deportes",
     "san-rafael": "San Rafael",
     "tabacalera": "Tabacalera",
     "condesa": "Condesa",
-    "hipodromo": "Hipódromo",
-    "hipodromo-condesa": "Hipódromo Condesa",
+    "hipodromo": "Hipodromo",
+    "hipodromo-condesa": "Hipodromo Condesa",
     "anzures": "Anzures",
 }
 
@@ -43,9 +40,8 @@ def get_driver():
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
-    options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
     options.binary_location = os.environ.get("CHROME_BIN", "/usr/bin/chromium")
-
     from selenium.webdriver.chrome.service import Service
     service = Service(os.environ.get("CHROMEDRIVER_PATH", "/usr/bin/chromedriver"))
     driver = webdriver.Chrome(service=service, options=options)
@@ -56,7 +52,7 @@ def get_driver():
 def parse_number(text):
     if not text:
         return None
-    nums = re.findall(r'[\d,\.]+', str(text).replace(',', ''))
+    nums = re.findall(r'\d+', str(text).replace(',', ''))
     if nums:
         try:
             return float(nums[0])
@@ -89,110 +85,51 @@ def scrape_inmuebles24(driver, colonia):
     url = f"https://www.inmuebles24.com/terrenos-en-venta-en-{colonia}-ciudad-de-mexico.html"
     try:
         driver.get(url)
-        time.sleep(3)
+        time.sleep(4)
+        page_source = driver.page_source
 
-        # Wait for listings to load
-        try:
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, '[data-qa="posting PROPERTY"]'))
-            )
-        except:
-            pass
+        # Debug: show what selectors find
+        s1 = driver.find_elements(By.CSS_SELECTOR, '[data-qa="posting PROPERTY"]')
+        s2 = driver.find_elements(By.CSS_SELECTOR, '.listing-card')
+        s3 = driver.find_elements(By.CSS_SELECTOR, '[class*="posting"]')
+        s4 = driver.find_elements(By.CSS_SELECTOR, 'article')
+        print(f"    [I24] {colonia}: s1={len(s1)} s2={len(s2)} s3={len(s3)} s4={len(s4)}")
 
-       listings = driver.find_elements(By.CSS_SELECTOR, '[data-qa="posting PROPERTY"]')
-print(f"    [I24] {colonia}: {len(listings)} listings con selector 1")
-if not listings:
-    listings = driver.find_elements(By.CSS_SELECTOR, '.listing-card')
-    print(f"    [I24] {colonia}: {len(listings)} listings con selector 2")
-if not listings:
-    # Try to see what's on the page
-    cards = driver.find_elements(By.CSS_SELECTOR, '[class*="card"]')
-    print(f"    [I24] {colonia}: {len(cards)} elementos con 'card' en clase")
-        if not listings:
-            listings = driver.find_elements(By.CSS_SELECTOR, '.listing-card')
+        listings = s1 or s2 or s3 or s4
 
         for item in listings[:10]:
             try:
-                title_el = item.find_elements(By.CSS_SELECTOR, '[data-qa="posting-title"]')
-                price_el = item.find_elements(By.CSS_SELECTOR, '[data-qa="price"]')
-                area_el = item.find_elements(By.CSS_SELECTOR, '[data-qa="surface-area"]')
-                link_el = item.find_elements(By.TAG_NAME, 'a')
-
-                title = title_el[0].text if title_el else "Terreno"
-                price_text = price_el[0].text if price_el else ""
-                area_text = area_el[0].text if area_el else ""
-                link = link_el[0].get_attribute('href') if link_el else url
-
-                l = make_listing("Inmuebles24", title, price_text, area_text, link, COLONIAS_DISPLAY.get(colonia, colonia))
+                title = item.text[:80] if item.text else "Terreno"
+                links = item.find_elements(By.TAG_NAME, 'a')
+                link = links[0].get_attribute('href') if links else url
+                l = make_listing("Inmuebles24", title, "", "", link, COLONIAS_DISPLAY.get(colonia, colonia))
                 if l:
                     results.append(l)
             except Exception:
                 continue
-
     except Exception as e:
         print(f"    [I24] Error {colonia}: {e}")
-    return results
-
-
-def scrape_vivanuncios(driver, colonia):
-    results = []
-    url = f"https://www.vivanuncios.com.mx/s-terrenos-en-venta/{colonia}/v1c1117l10201p1"
-    try:
-        driver.get(url)
-        time.sleep(3)
-
-        listings = driver.find_elements(By.CSS_SELECTOR, '.ad-listing')
-        if not listings:
-            listings = driver.find_elements(By.CSS_SELECTOR, '[data-id]')
-
-        for item in listings[:10]:
-            try:
-                title_el = item.find_elements(By.TAG_NAME, 'h2')
-                price_el = item.find_elements(By.CSS_SELECTOR, '.price')
-                link_el = item.find_elements(By.TAG_NAME, 'a')
-
-                title = title_el[0].text if title_el else "Terreno"
-                price_text = price_el[0].text if price_el else ""
-                link = link_el[0].get_attribute('href') if link_el else url
-
-                l = make_listing("Vivanuncios", title, price_text, "", link, COLONIAS_DISPLAY.get(colonia, colonia))
-                if l:
-                    results.append(l)
-            except Exception:
-                continue
-
-    except Exception as e:
-        print(f"    [VV] Error {colonia}: {e}")
     return results
 
 
 def scrape_all():
     all_results = []
     print("  [Selenium scraper iniciando...]")
-
     driver = None
     try:
         driver = get_driver()
         print("  [Chrome OK]")
-
         for colonia in COLONIAS:
             print(f"  Scraping {COLONIAS_DISPLAY.get(colonia, colonia)}...")
-
-            r1 = scrape_inmuebles24(driver, colonia)
-            all_results.extend(r1)
+            r = scrape_inmuebles24(driver, colonia)
+            all_results.extend(r)
             time.sleep(2)
-
-            r2 = scrape_vivanuncios(driver, colonia)
-            all_results.extend(r2)
-            time.sleep(2)
-
-        print(f"  Total: {len(all_results)} terrenos encontrados")
-
+        print(f"  Total bruto: {len(all_results)}")
     except Exception as e:
-        print(f"  [Selenium error]: {e}")
-        import traceback; traceback.print_exc()
+        print(f"  [Error]: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
         if driver:
             driver.quit()
-
     return all_results
