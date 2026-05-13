@@ -8,19 +8,48 @@ MIN_M2 = 400
 MAX_M2 = 1500
 MIN_FRENTE = 14
 
+ML_CLIENT_ID = os.environ.get("ML_CLIENT_ID", "")
+ML_CLIENT_SECRET = os.environ.get("ML_CLIENT_SECRET", "")
+EASYBROKER_KEY = os.environ.get("EASYBROKER_API_KEY", "")
+
+_ml_token = None
+_ml_token_expiry = 0
+
+
+def get_ml_token():
+    global _ml_token, _ml_token_expiry
+    now = time.time()
+    if _ml_token and now < _ml_token_expiry:
+        return _ml_token
+    try:
+        r = requests.post(
+            "https://api.mercadolibre.com/oauth/token",
+            data={
+                "grant_type": "client_credentials",
+                "client_id": ML_CLIENT_ID,
+                "client_secret": ML_CLIENT_SECRET,
+            },
+            timeout=15
+        )
+        if r.status_code == 200:
+            data = r.json()
+            _ml_token = data.get("access_token")
+            _ml_token_expiry = now + data.get("expires_in", 21600) - 300
+            print(f"  [ML] Token OK")
+            return _ml_token
+        else:
+            print(f"  [ML] Token error: {r.status_code} {r.text[:100]}")
+    except Exception as e:
+        print(f"  [ML] Token error: {e}")
+    return None
+
+
 COLONIAS_DISPLAY = [
     "Del Valle Norte", "Del Valle Centro", "Roma Norte", "Roma Sur",
     "Nápoles", "Cuauhtémoc", "Juárez", "Ciudad de los Deportes",
     "San Rafael", "Tabacalera", "Condesa", "Hipódromo",
     "Hipódromo Condesa", "Anzures"
 ]
-
-# MercadoLibre category for land in CDMX
-# MLM1473 = Terrenos y Lotes, state = Distrito Federal
-ML_CATEGORY = "MLM1473"
-ML_STATE = "TUxNREZFREVyYWwx"  # Distrito Federal
-
-EASYBROKER_KEY = os.environ.get("EASYBROKER_API_KEY", "")
 
 
 def make_listing(portal, title, price, price_text, area, frente, link, colonia=""):
@@ -38,54 +67,65 @@ def make_listing(portal, title, price, price_text, area, frente, link, colonia="
 
 
 def passes_filters(area, frente):
-    """Basic filter: area in range, frente minimum."""
     if area and (area < MIN_M2 or area > MAX_M2):
         return False
-    # Only reject on frente if we actually have the data
     if frente and frente < MIN_FRENTE:
         return False
     return True
 
 
 def colonia_match(text):
-    """Check if listing mentions one of our target colonias."""
     if not text:
         return ""
     text_lower = text.lower()
     for c in COLONIAS_DISPLAY:
         if c.lower() in text_lower:
             return c
-        # partial matches
         parts = c.lower().split()
-        if all(p in text_lower for p in parts):
+        if len(parts) > 1 and all(p in text_lower for p in parts):
             return c
     return ""
 
 
-# ── MERCADOLIBRE API ──────────────────────────────────────────────────────────
 def scrape_mercadolibre_api():
     results = []
     print("  [MercadoLibre API]")
 
-    # Search terrenos in CDMX
-    offset = 0
-    while offset < 200:  # max 200 results per run
-        url = (
-            f"https://api.mercadolibre.com/sites/MLM/search"
-            f"?category={ML_CATEGORY}"
-            f"&state={ML_STATE}"
-            f"&q=terreno+venta+CDMX"
-            f"&offset={offset}&limit=50"
-        )
+    token = get_ml_token()
+    if not token:
+        print("    Sin token — skip")
+        return results
+
+    auth_headers = {**HEADERS, "Authorization": f"Bearer {token}"}
+
+    # CDMX bounding box coordinates
+    # lat: 19.20 to 19.60, lon: -99.35 to -98.95
+    searches = [
+        "terreno venta Del Valle CDMX",
+        "terreno venta Roma Condesa CDMX",
+        "terreno venta Narvarte Nápoles CDMX",
+        "terreno venta Juárez Cuauhtémoc CDMX",
+        "terreno venta San Rafael Tabacalera CDMX",
+        "terreno venta Anzures CDMX",
+    ]
+
+    for q in searches:
         try:
-            r = requests.get(url, timeout=15)
+            url = (
+                f"https://api.mercadolibre.com/sites/MLM/search"
+                f"?q={requests.utils.quote(q)}"
+                f"&category=MLM1473"
+                f"&item_location=lat:19.20_19.60,lon:-99.35_-98.95"
+                f"&limit=50"
+            )
+            r = requests.get(url, headers=auth_headers, timeout=15)
             if r.status_code != 200:
-                print(f"    ML API error: {r.status_code}")
-                break
+                print(f"    ML error {r.status_code}: {r.text[:80]}")
+                continue
+
             data = r.json()
             items = data.get("results", [])
-            if not items:
-                break
+            print(f"    '{q[:30]}': {len(items)} resultados")
 
             for item in items:
                 try:
@@ -95,91 +135,69 @@ def scrape_mercadolibre_api():
                     currency = item.get("currency_id", "MXN")
                     price_text = f"${price:,.0f} {currency}" if price else ""
 
-                    # Extract area and frente from attributes
                     area = None
                     frente = None
                     colonia = ""
-                    attrs = item.get("attributes", [])
-                    for attr in attrs:
+
+                    for attr in item.get("attributes", []):
                         attr_id = attr.get("id", "")
                         val = attr.get("value_name", "") or ""
-                        if attr_id == "TOTAL_AREA":
-                            try: area = float(str(val).replace(",", "").replace("m²","").strip())
+                        if attr_id in ("TOTAL_AREA", "LOT_SIZE"):
+                            try: area = float(str(val).replace(",","").replace("m²","").strip())
                             except: pass
                         elif attr_id == "LOT_FRONTAGE":
                             try: frente = float(str(val).replace("m","").strip())
                             except: pass
                         elif attr_id == "NEIGHBORHOOD":
-                            colonia = val
+                            colonia = colonia_match(val) or val
 
-                    # Try to match colonia from title if not in attributes
-                    if not colonia:
-                        colonia = colonia_match(title)
                     if not colonia:
                         loc = item.get("location", {})
-                        neighborhood = loc.get("neighborhood", {}).get("name", "")
-                        colonia = colonia_match(neighborhood) or neighborhood
+                        nb = loc.get("neighborhood", {}).get("name", "")
+                        colonia = colonia_match(nb) or colonia_match(title)
 
-                    # Filter: must be in our colonias
                     if not colonia:
                         continue
-
-                    # Filter: area and frente
                     if not passes_filters(area, frente):
                         continue
 
-                    listing = make_listing(
+                    results.append(make_listing(
                         "MercadoLibre", title, price, price_text,
                         area, frente, link, colonia
-                    )
-                    results.append(listing)
-
-                except Exception as e:
+                    ))
+                except Exception:
                     continue
 
-            offset += 50
-            if offset < data.get("paging", {}).get("total", 0):
-                time.sleep(1)
-            else:
-                break
+            time.sleep(0.5)
 
         except Exception as e:
-            print(f"    ML error: {e}")
-            break
+            print(f"    Error: {e}")
 
-    print(f"    ✓ {len(results)} terrenos encontrados")
+    print(f"    Total ML: {len(results)} terrenos")
     return results
 
 
-# ── EASYBROKER API ────────────────────────────────────────────────────────────
 def scrape_easybroker_api():
     results = []
     if not EASYBROKER_KEY:
-        print("  [EasyBroker] Sin API key — skip")
         return results
 
     print("  [EasyBroker API]")
     page = 1
     while page <= 5:
-        url = (
-            f"https://api.easybroker.com/v1/properties"
-            f"?operation_type=sale&property_type=land"
-            f"&location=Ciudad+de+Mexico"
-            f"&page={page}&per_page=50"
-        )
         try:
-            r = requests.get(url, headers={
-                **HEADERS,
-                "X-Authorization": EASYBROKER_KEY
-            }, timeout=15)
+            r = requests.get(
+                f"https://api.easybroker.com/v1/properties"
+                f"?operation_type=sale&property_type=land"
+                f"&location=Ciudad+de+Mexico&page={page}&per_page=50",
+                headers={**HEADERS, "X-Authorization": EASYBROKER_KEY},
+                timeout=15
+            )
             if r.status_code != 200:
-                print(f"    EB error: {r.status_code}")
                 break
-            data = r.json()
-            items = data.get("content", [])
+            items = r.json().get("content", [])
             if not items:
                 break
-
             for item in items:
                 try:
                     title = item.get("title", "Terreno")
@@ -187,35 +205,26 @@ def scrape_easybroker_api():
                     price_text = f"${price:,.0f} MXN" if price else ""
                     link = item.get("public_url", "")
                     area = item.get("lot_size") or item.get("construction_size")
-                    location = item.get("location", {})
-                    neighborhood = location.get("neighborhood", "") or ""
-                    colonia = colonia_match(neighborhood) or colonia_match(title)
-
-                    if not colonia:
+                    nb = (item.get("location") or {}).get("neighborhood", "") or ""
+                    colonia = colonia_match(nb) or colonia_match(title)
+                    if not colonia or not passes_filters(area, None):
                         continue
-                    if not passes_filters(area, None):
-                        continue
-
-                    listing = make_listing(
+                    results.append(make_listing(
                         "EasyBroker", title, price, price_text,
                         area, None, link, colonia
-                    )
-                    results.append(listing)
+                    ))
                 except Exception:
                     continue
-
             page += 1
             time.sleep(1)
-
         except Exception as e:
             print(f"    EB error: {e}")
             break
 
-    print(f"    ✓ {len(results)} terrenos encontrados")
+    print(f"    Total EB: {len(results)} terrenos")
     return results
 
 
-# ── MASTER ────────────────────────────────────────────────────────────────────
 def scrape_all():
     all_results = []
     all_results.extend(scrape_mercadolibre_api())
