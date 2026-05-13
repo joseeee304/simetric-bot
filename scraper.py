@@ -15,6 +15,28 @@ EASYBROKER_KEY = os.environ.get("EASYBROKER_API_KEY", "")
 _ml_token = None
 _ml_token_expiry = 0
 
+# Neighborhood IDs from MercadoLibre API - exact matches for target colonias
+NEIGHBORHOODS = {
+    # Benito Juárez
+    "Del Valle Centro":          "TUxNQkRFTEEwN0U",
+    "Del Valle Norte":           "TUxNTUxNQkRFTEFKQg",
+    "Nápoles":                   "TUxNQk7BUDUwNzQ",
+    "Ciudad de los Deportes":    "TUxNQkNJVTYzMDc",
+    "Colonia Del Valle":         "TUxNQkRFTDY3NTg",
+    # Cuauhtémoc - get from that city
+    # Miguel Hidalgo - get from that city
+}
+
+# City IDs to search
+CITY_IDS = {
+    "Benito Juárez":   "TUxNQ0JFTjM2MjQ",
+    "Cuauhtémoc":      "TUxNQ0NVQTczMTI",
+    "Miguel Hidalgo":  "TUxNQ01JRzU0Mjg",
+}
+
+# MLM real estate category for terrenos
+ML_CATEGORY = "MLM1473"
+
 
 def get_ml_token():
     global _ml_token, _ml_token_expiry
@@ -44,12 +66,38 @@ def get_ml_token():
     return None
 
 
-COLONIAS_DISPLAY = [
-    "Del Valle Norte", "Del Valle Centro", "Roma Norte", "Roma Sur",
-    "Nápoles", "Cuauhtémoc", "Juárez", "Ciudad de los Deportes",
-    "San Rafael", "Tabacalera", "Condesa", "Hipódromo",
-    "Hipódromo Condesa", "Anzures"
+def get_neighborhoods_for_city(city_id, token):
+    """Fetch all neighborhoods for a city from ML API."""
+    try:
+        r = requests.get(
+            f"https://api.mercadolibre.com/classified_locations/cities/{city_id}",
+            headers={**HEADERS, "Authorization": f"Bearer {token}"},
+            timeout=15
+        )
+        if r.status_code == 200:
+            return r.json().get("neighborhoods", [])
+    except Exception as e:
+        print(f"  [ML] Error fetching neighborhoods: {e}")
+    return []
+
+
+TARGET_COLONIAS = [
+    "del valle norte", "del valle centro", "roma norte", "roma sur",
+    "napoles", "nápoles", "cuauhtémoc", "cuauhtemoc", "juárez", "juarez",
+    "ciudad de los deportes", "san rafael", "tabacalera", "condesa",
+    "hipódromo", "hipodromo", "hipódromo condesa", "hipodromo condesa", "anzures"
 ]
+
+
+def matches_target(name):
+    if not name:
+        return False
+    n = name.lower().replace("á","a").replace("é","e").replace("í","i").replace("ó","o").replace("ú","u")
+    for c in TARGET_COLONIAS:
+        c2 = c.replace("á","a").replace("é","e").replace("í","i").replace("ó","o").replace("ú","u")
+        if c2 in n or n in c2:
+            return True
+    return False
 
 
 def make_listing(portal, title, price, price_text, area, frente, link, colonia=""):
@@ -74,17 +122,65 @@ def passes_filters(area, frente):
     return True
 
 
-def colonia_match(text):
-    if not text:
-        return ""
-    text_lower = text.lower()
-    for c in COLONIAS_DISPLAY:
-        if c.lower() in text_lower:
-            return c
-        parts = c.lower().split()
-        if len(parts) > 1 and all(p in text_lower for p in parts):
-            return c
-    return ""
+def search_by_neighborhood(neighborhood_id, neighborhood_name, token):
+    """Search terrenos in a specific neighborhood."""
+    results = []
+    try:
+        url = (
+            f"https://api.mercadolibre.com/sites/MLM/search"
+            f"?category={ML_CATEGORY}"
+            f"&neighborhood={neighborhood_id}"
+            f"&limit=50"
+        )
+        r = requests.get(url, headers={**HEADERS, "Authorization": f"Bearer {token}"}, timeout=15)
+        if r.status_code != 200:
+            # Try with state filter
+            url2 = (
+                f"https://api.mercadolibre.com/sites/MLM/search"
+                f"?category={ML_CATEGORY}"
+                f"&state=TUxNUERJUzYwOTQ"
+                f"&city={neighborhood_id}"
+                f"&limit=50"
+            )
+            r = requests.get(url2, headers={**HEADERS, "Authorization": f"Bearer {token}"}, timeout=15)
+            if r.status_code != 200:
+                return results
+
+        items = r.json().get("results", [])
+        for item in items:
+            try:
+                title = item.get("title", "")
+                price = item.get("price")
+                link = item.get("permalink", "")
+                currency = item.get("currency_id", "MXN")
+                price_text = f"${price:,.0f} {currency}" if price else ""
+
+                area = None
+                frente = None
+
+                for attr in item.get("attributes", []):
+                    attr_id = attr.get("id", "")
+                    val = attr.get("value_name", "") or ""
+                    if attr_id in ("TOTAL_AREA", "LOT_SIZE", "SURFACE_TOTAL"):
+                        try: area = float(str(val).replace(",","").replace("m²","").strip())
+                        except: pass
+                    elif attr_id == "LOT_FRONTAGE":
+                        try: frente = float(str(val).replace("m","").strip())
+                        except: pass
+
+                if not passes_filters(area, frente):
+                    continue
+
+                results.append(make_listing(
+                    "MercadoLibre", title, price, price_text,
+                    area, frente, link, neighborhood_name
+                ))
+            except Exception:
+                continue
+
+    except Exception as e:
+        print(f"    Error {neighborhood_name}: {e}")
+    return results
 
 
 def scrape_mercadolibre_api():
@@ -96,82 +192,26 @@ def scrape_mercadolibre_api():
         print("    Sin token — skip")
         return results
 
-    auth_headers = {**HEADERS, "Authorization": f"Bearer {token}"}
+    # Get neighborhoods for each target city and filter by target colonias
+    all_target_neighborhoods = {}
 
-    # CDMX bounding box coordinates
-    # lat: 19.20 to 19.60, lon: -99.35 to -98.95
-    searches = [
-        "terreno venta Del Valle CDMX",
-        "terreno venta Roma Condesa CDMX",
-        "terreno venta Narvarte Nápoles CDMX",
-        "terreno venta Juárez Cuauhtémoc CDMX",
-        "terreno venta San Rafael Tabacalera CDMX",
-        "terreno venta Anzures CDMX",
-    ]
+    for city_name, city_id in CITY_IDS.items():
+        neighborhoods = get_neighborhoods_for_city(city_id, token)
+        for nb in neighborhoods:
+            if matches_target(nb.get("name", "")):
+                all_target_neighborhoods[nb["id"]] = nb["name"]
+                print(f"    ✓ Colonia encontrada: {nb['name']}")
+        time.sleep(0.3)
 
-    for q in searches:
-        try:
-            url = (
-                f"https://api.mercadolibre.com/sites/MLM/search"
-                f"?q={requests.utils.quote(q)}"
-                f"&category=MLM1473"
-                f"&item_location=lat:19.20_19.60,lon:-99.35_-98.95"
-                f"&limit=50"
-            )
-            r = requests.get(url, headers=auth_headers, timeout=15)
-            if r.status_code != 200:
-                print(f"    ML error {r.status_code}: {r.text[:80]}")
-                continue
+    print(f"  Buscando en {len(all_target_neighborhoods)} colonias...")
 
-            data = r.json()
-            items = data.get("results", [])
-            print(f"    '{q[:30]}': {len(items)} resultados")
-
-            for item in items:
-                try:
-                    title = item.get("title", "")
-                    price = item.get("price")
-                    link = item.get("permalink", "")
-                    currency = item.get("currency_id", "MXN")
-                    price_text = f"${price:,.0f} {currency}" if price else ""
-
-                    area = None
-                    frente = None
-                    colonia = ""
-
-                    for attr in item.get("attributes", []):
-                        attr_id = attr.get("id", "")
-                        val = attr.get("value_name", "") or ""
-                        if attr_id in ("TOTAL_AREA", "LOT_SIZE"):
-                            try: area = float(str(val).replace(",","").replace("m²","").strip())
-                            except: pass
-                        elif attr_id == "LOT_FRONTAGE":
-                            try: frente = float(str(val).replace("m","").strip())
-                            except: pass
-                        elif attr_id == "NEIGHBORHOOD":
-                            colonia = colonia_match(val) or val
-
-                    if not colonia:
-                        loc = item.get("location", {})
-                        nb = loc.get("neighborhood", {}).get("name", "")
-                        colonia = colonia_match(nb) or colonia_match(title)
-
-                    if not colonia:
-                        continue
-                    if not passes_filters(area, frente):
-                        continue
-
-                    results.append(make_listing(
-                        "MercadoLibre", title, price, price_text,
-                        area, frente, link, colonia
-                    ))
-                except Exception:
-                    continue
-
-            time.sleep(0.5)
-
-        except Exception as e:
-            print(f"    Error: {e}")
+    # Search terrenos in each target neighborhood
+    for nb_id, nb_name in all_target_neighborhoods.items():
+        found = search_by_neighborhood(nb_id, nb_name, token)
+        results.extend(found)
+        if found:
+            print(f"    {nb_name}: {len(found)} terrenos")
+        time.sleep(0.5)
 
     print(f"    Total ML: {len(results)} terrenos")
     return results
@@ -206,7 +246,7 @@ def scrape_easybroker_api():
                     link = item.get("public_url", "")
                     area = item.get("lot_size") or item.get("construction_size")
                     nb = (item.get("location") or {}).get("neighborhood", "") or ""
-                    colonia = colonia_match(nb) or colonia_match(title)
+                    colonia = nb if matches_target(nb) else ""
                     if not colonia or not passes_filters(area, None):
                         continue
                     results.append(make_listing(
