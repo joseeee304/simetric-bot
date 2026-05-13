@@ -99,7 +99,15 @@ def scrape_inmuebles24(driver, colonia):
         except:
             pass
 
-        listings = driver.find_elements(By.CSS_SELECTOR, '[data-qa="posting PROPERTY"]')
+       listings = driver.find_elements(By.CSS_SELECTOR, '[data-qa="posting PROPERTY"]')
+print(f"    [I24] {colonia}: {len(listings)} listings con selector 1")
+if not listings:
+    listings = driver.find_elements(By.CSS_SELECTOR, '.listing-card')
+    print(f"    [I24] {colonia}: {len(listings)} listings con selector 2")
+if not listings:
+    # Try to see what's on the page
+    cards = driver.find_elements(By.CSS_SELECTOR, '[class*="card"]')
+    print(f"    [I24] {colonia}: {len(cards)} elementos con 'card' en clase")
         if not listings:
             listings = driver.find_elements(By.CSS_SELECTOR, '.listing-card')
 
