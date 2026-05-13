@@ -4,7 +4,8 @@ import sys
 import os
 from datetime import datetime
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+# Files are in the same directory as bot.py
+sys.path.insert(0, os.path.dirname(__file__))
 
 from scraper import scrape_all
 from notifier import notify_listing, notify_summary, notify_startup
@@ -19,7 +20,7 @@ def run_scan():
         print(f"  Nuevos: {len(new_listings)} de {len(listings)} totales")
 
         for l in new_listings:
-            print(f"  → {l['colonia']} | {l.get('area_text') or l.get('area')} | {l.get('price_text')}")
+            print(f"  → {l['colonia']} | {l.get('area')} m² | {l.get('price_text')}")
             notify_listing(l)
             time.sleep(1.5)
 
